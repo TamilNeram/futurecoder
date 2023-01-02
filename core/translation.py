@@ -220,6 +220,9 @@ def disallowed_label(cls, i):
     return f"{disallowed(cls, i)}.label"
 
 
+def requirements(cls):
+    return f"{step_cls(cls)}.requirements"
+
 def code_bit(node_text):
     return f"code_bits.{node_text}"
 
@@ -326,6 +329,8 @@ your code outputs:"""
 
     when_it_should_output = "when it should output:"
 
+    which_is_correct = "which is correct!"
+
     copy_button = "Copy"
 
     q_wiz_final_message = """
@@ -397,8 +402,6 @@ to the top of your code."""
     )
 
     no_more_test_inputs = "No more test inputs - solution should have finished by now"
-
-    internal_error = "Internal error"
 
     syntax_error_at_line = "at line"
 

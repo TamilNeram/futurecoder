@@ -17,7 +17,15 @@ import {languageConfig} from "../languages";
 export const disableFirebase = !!process.env.REACT_APP_DISABLE_FIREBASE;
 export const disableLogin = disableFirebase || !!process.env.REACT_APP_DISABLE_LOGIN;
 
-const {firebaseConfig} = languageConfig;
+const firebaseConfig = !process.env.REACT_APP_FIREBASE_STAGING ? languageConfig.firebaseConfig : {
+  apiKey: "AIzaSyC3S9l7lI3f3IiiWURO_AGmWBTLP0lKeC0",
+  authDomain: "futurecoder-staging.firebaseapp.com",
+  databaseURL: "https://futurecoder-staging-default-rtdb.firebaseio.com",
+  projectId: "futurecoder-staging",
+  storageBucket: "futurecoder-staging.appspot.com",
+  messagingSenderId: "513885780206",
+  appId: "1:513885780206:web:1144315640a5ba46c01bff"
+};
 const firebaseApp = !disableFirebase && firebase.initializeApp(firebaseConfig);
 
 let {databaseURL} = firebaseConfig;
@@ -54,6 +62,7 @@ const initialState = {
           hints: [],
           name: "loading_placeholder",
           solution: null,
+          requirements: null,
         }
       ],
     },
@@ -72,11 +81,16 @@ const initialState = {
   },
   processing: false,
   running: false,
-  numHints: 0,
   editorContent: "",
-  messages: [],
-  pastMessages: [],
-  requestingSolution: 0,
+  specialMessages: [],
+  pastSpecialMessages: [],
+  assessmentOpen: false,
+  assistant: {
+    numHints: 0,
+    messageSections: [],
+    requestingSolution: 0,
+    lastSeenMessageSections: [],
+  },
   prediction: {
     choices: null,
     answer: "",
@@ -119,6 +133,7 @@ export const currentStep = (state = localState) =>
 
 export const setPage = (page_slug) => {
   setState("user.pageSlug", page_slug);
+  setState("assistant", initialState.assistant);
   afterSetPage(page_slug);
 };
 
@@ -168,6 +183,7 @@ export const moveStep = (delta) => {
     animateStep(stepIndex);
   }
   setUserStateAndDatabase(["pagesProgress", localState.user.pageSlug, "step_name"], step.name);
+  setState("assistant", initialState.assistant);
 };
 
 const animateStep = (stepIndex) => {
@@ -370,11 +386,15 @@ function migrateUserState(pages, pagesProgress, updates) {
 
 export const showHint = makeAction(
   'SHOW_HINT',
+  (state) => iset(state, "assistant.numHints", state.assistant.numHints + 1),
+);
+
+export const openAssessment = makeAction(
+  'OPEN_ASSESSMENT',
   (state) => {
-    return {
-      ...state,
-      numHints: state.numHints + 1,
-    };
+    state = iset(state, "assessmentOpen", true);
+    state = iset(state, "assistant.lastSeenMessageSections", state.assistant.messageSections);
+    return state;
   },
 );
 
@@ -399,8 +419,7 @@ export const ranCode = makeAction(
 
       state = {
         ...state,
-        ..._.pick(initialState,
-          "numHints messages requestingSolution".split(" ")),
+        assistant: initialState.assistant,
         prediction: {
           ...prediction,
           userChoice: "",
@@ -426,37 +445,36 @@ export const ranCode = makeAction(
         state = iset(state, "questionWizard.messages", value.messages);
       }
     } else {
-      for (const message of value.messages) {
-        state = addMessageToState(state, message);
+      state = iset(state, "assistant.messageSections", value.message_sections);
+      if (state.assessmentOpen) {
+        state = iset(state, "assistant.lastSeenMessageSections", value.message_sections);
       }
     }
 
-    state = {
-      ...state,
-      processing: false,
-      running: false,
-    }
     return state;
   },
 );
 
-const addMessageToState = (state, message) => {
-  if (message && state.pastMessages.indexOf(message) === -1) {
+// 'Special messages' currently only means the "don't copy" popup.
+// It used to be all kinds of messages, but those coming from the Python checker
+// (now called 'messageSections') have been moved into the assistant.
+const addSpecialMessageToState = (state, message) => {
+  if (message && state.pastSpecialMessages.indexOf(message) === -1) {
       animateScroll.scrollToBottom({duration: 1000, delay: 500});
-      state = ipush(state, "messages", message);
-      state = ipush(state, "pastMessages", message);
+      state = ipush(state, "specialMessages", message);
+      state = ipush(state, "pastSpecialMessages", message);
     }
   return state;
 }
 
-export const addMessage = makeAction(
-  'ADD_MESSAGE',
-  (state, {value}) => addMessageToState(state, value)
+export const addSpecialMessage = makeAction(
+  'ADD_SPECIAL_MESSAGE',
+  (state, {value}) => addSpecialMessageToState(state, value)
 )
 
-export const closeMessage = makeAction(
-  'CLOSE_MESSAGE',
-  (state, {value}) => iremove(state, "messages", value)
+export const closeSpecialMessage = makeAction(
+  'CLOSE_SPECIAL_MESSAGE',
+  (state, {value}) => iremove(state, "specialMessages", value)
 )
 
 export const revealSolutionToken = makeAction(
@@ -491,22 +509,24 @@ export const reorderSolutionLines = makeAction(
 )
 
 export function logEvent(name, data = {}) {
+  console.log("Logging event", name, data);
   firebaseAnalytics?.logEvent(name, data);
 }
 
 export function postCodeEntry(codeEntry) {
+  const {user: {developerMode}, route, assistant: {numHints, requestingSolution}} = localState;
+  codeEntry = {
+    ...codeEntry,
+    state: {
+      developerMode,
+      page_route: route,
+      num_hints: numHints,
+      requesting_solution: requestingSolution,
+    },
+    timestamp: new Date().toISOString(),
+  };
+  console.log("Posting code entry", codeEntry);
   if (isProduction) {
-    const {user: {developerMode}, route, numHints, requestingSolution} = localState;
-    codeEntry = {
-      ...codeEntry,
-      state: {
-        developerMode,
-        page_route: route,
-        num_hints: numHints,
-        requesting_solution: requestingSolution,
-      },
-      timestamp: new Date().toISOString(),
-    };
     databaseRequest("POST", codeEntry, "code_entries").catch(e => console.error(e));
   }
 }

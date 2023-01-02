@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 from time import sleep
@@ -17,29 +18,82 @@ this_dir = Path(__file__).parent
 assets_dir = this_dir / "test_frontend_assets"
 assets_dir.mkdir(exist_ok=True)
 
+sauce_tunnel = os.environ.get("SAUCE_TUNNEL")
 
-def test_frontend():
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    desired_capabilities = DesiredCapabilities.CHROME
-    desired_capabilities["goog:loggingPrefs"] = {"browser": "ALL"}
-    driver = webdriver.Chrome(
-        options=options, desired_capabilities=desired_capabilities
-    )
+
+def get_driver(caps):
+    if sauce_tunnel:
+        desired_capabilities = {
+            **caps,
+            "sauce:options": {
+                "tunnelName": sauce_tunnel,
+                "name": "futurecoder",
+            },
+        }
+        url = "https://{SAUCE_USERNAME}:{SAUCE_ACCESS_KEY}@ondemand.eu-central-1.saucelabs.com:443/wd/hub".format(
+            **os.environ
+        )
+        driver = webdriver.Remote(
+            command_executor=url,
+            desired_capabilities=desired_capabilities,
+        )
+    else:
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--disable-gpu")
+        desired_capabilities = DesiredCapabilities.CHROME
+        desired_capabilities["goog:loggingPrefs"] = {"browser": "ALL"}
+        driver = webdriver.Chrome(
+            options=options, desired_capabilities=desired_capabilities
+        )
     driver.set_window_size(1024, 768)
     driver.implicitly_wait(5)
+    return driver
+
+
+def params():
+    if not sauce_tunnel:
+        yield None
+        return
+    for os_name, extra_browser, os_versions in [
+        ["Windows", "MicrosoftEdge", ["11", "10"]],
+        ["macOS", "Safari", ["12", "11.00"]],
+    ]:
+        for os_version in os_versions[:1]:  # TODO use all versions
+            for browser in ["Chrome", "Firefox", extra_browser]:
+                caps = dict(
+                    platform=f"{os_name} {os_version}",
+                    version="latest",
+                    browserName=browser,
+                )
+                if browser == "Safari" and os_version == "12":
+                    yield caps | {"version": "15"}
+                else:
+                    yield caps
+                return  # TODO
+
+
+@pytest.mark.parametrize("caps", list(params()))
+def test_frontend(caps):
+    driver = get_driver(caps)
+    status = "failed"
     try:
         _tests(driver)
+        status = "passed"
     finally:
-        driver.save_screenshot(str(assets_dir / "screenshot.png"))
-        (assets_dir / "logs.txt").write_text(
-            "\n".join(entry["message"] for entry in driver.get_log("browser"))
-        )
-        (assets_dir / "page_source.html").write_text(driver.page_source)
-        (assets_dir / "state.json").write_text(
-            driver.execute_script("return JSON.stringify(reduxStore.getState())")
-        )
+        if sauce_tunnel:
+            driver.execute_script(f"sauce:job-result={status}")
+        try:
+            driver.save_screenshot(str(assets_dir / "screenshot.png"))
+            (assets_dir / "logs.txt").write_text(
+                "\n".join(entry["message"] for entry in driver.get_log("browser"))
+            )
+            (assets_dir / "page_source.html").write_text(driver.page_source)
+            (assets_dir / "state.json").write_text(
+                driver.execute_script("return JSON.stringify(reduxStore.getState())")
+            )
+        finally:
+            driver.quit()
 
 
 def _tests(driver):
@@ -180,9 +234,6 @@ list
 >>> """
     )
 
-    # No hint button present
-    assert not driver.find_elements_by_class_name("hint-icon")
-
     # Skip forward to output prediction step: printing_the_range
     for _ in range(3):
         skip_button.click()
@@ -222,6 +273,7 @@ list
 
     assert "Given a list" in driver.find_element_by_css_selector(".book-text").text
 
+    driver.find_element_by_css_selector(".assistant-hints .card-header").click()
     show_hints_and_solution(driver, num_hints=9, parsons=False)
 
     # Hidden solution contains correct text
@@ -238,40 +290,29 @@ for i in range(len(things)):
     # Click button repeatedly to reveal solution
     get_hint_button = driver.find_element_by_css_selector(".hints-popup .btn-primary")
     assert get_hint_button.text == "Reveal"
-    for i in range(25):
-        assert len(code.find_elements_by_class_name("solution-token-hidden")) == 25 - i
+    scroll_to_bottom(driver)
+    for i in range(24):
+        assert len(code.find_elements_by_class_name("solution-token-hidden")) == 24 - i
         assert len(code.find_elements_by_class_name("solution-token-visible")) == 12 + i
         get_hint_button.click()
 
-    # Dismiss hints
-    driver.find_element_by_class_name("hint-icon").click()
+    # Open assessment
+    force_click(driver, driver.find_element_by_css_selector(".assistant-assessment .card-header"))
 
     # No messages visible
-    assert not driver.find_elements_by_class_name("book-message")
+    assert not driver.find_elements_by_class_name("assistant-messages-message")
 
     # Run code which triggers a message
     run_code(editor, run_button, "12345")
 
     # Now we have a message
     assert (
-        driver.find_element_by_css_selector(".book-message .card-body").text
+        driver.find_element_by_css_selector(".assistant-messages-message").text
         == """\
 Your code should start like this:
 things = '...'
 to_find = '...'"""
     )
-
-    # Close the message
-    driver.find_element_by_css_selector(".book-message .card-header").click()
-
-    # No messages visible
-    assert not driver.find_elements_by_class_name("book-message")
-
-    # Run the same code again
-    run_code(editor, run_button, "12345")
-
-    # Message doesn't come back
-    assert not driver.find_elements_by_class_name("book-message")
 
     # Run code which triggers a different message
     # Here we leave out indentation because ace adds some
@@ -284,9 +325,11 @@ if to_find == things[i]:
 print(i)
 """)
 
+    await_result(driver, "1", "1\n4\n>>> ")
+
     # Now we have a message
     assert (
-        driver.find_element_by_css_selector(".book-message .card-body").text
+        driver.find_element_by_css_selector(".assistant-messages-message").text
         == "You're almost there! However, this prints all the indices, not just the first one."
     )
 
@@ -296,7 +339,7 @@ print(i)
     sleep(0.2)
 
     # Step has passed, message has disappeared
-    assert not driver.find_elements_by_class_name("book-message")
+    assert not driver.find_elements_by_class_name("assistant-messages-message")
 
     # Skip to zip_longest exercise
     skip_button.click()
@@ -327,9 +370,6 @@ for i in range(length):
     print(char1 + ' ' + char2)""".splitlines()
     )
 
-    # Dismiss hints
-    driver.find_element_by_class_name("hint-icon").click()
-
     # Cannot go to next page yet
     assert not driver.find_elements_by_class_name("next-button")
 
@@ -356,13 +396,11 @@ for i in range(length):
     )
 
 
+def scroll_to_bottom(driver):
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
+
 def show_hints_and_solution(driver, *, num_hints, parsons):
-    # No hints popup visible
-    assert not driver.find_elements_by_class_name("hints-popup")
-
-    # Click hint lightbulb
-    driver.find_element_by_class_name("hint-icon").click()
-
     # Show all hints
     for hint_num in range(num_hints):
         assert len(driver.find_elements_by_class_name("hint-body")) == hint_num
@@ -372,7 +410,13 @@ def show_hints_and_solution(driver, *, num_hints, parsons):
         assert get_hint_button.text == (
             "Get a hint" if hint_num == 0 else "Get another hint"
         )
+        scroll_to_bottom(driver)
         get_hint_button.click()
+        if hint_num < num_hints - 1:
+            hints_progress = driver.find_element_by_css_selector(
+                ".hints-popup .hints-progress"
+            )
+            assert hints_progress.text == f"Shown {hint_num + 1} of {num_hints} hints"
 
     # All hints are shown
     assert len(driver.find_elements_by_class_name("hint-body")) == num_hints
@@ -380,6 +424,7 @@ def show_hints_and_solution(driver, *, num_hints, parsons):
     # Click 'Show solution'
     get_hint_button = driver.find_element_by_css_selector(".hints-popup .btn-primary")
     assert get_hint_button.text == ("Show shuffled solution" if parsons else "Show solution")
+    scroll_to_bottom(driver)
     get_hint_button.click()
 
     # Solution not yet visible
@@ -389,6 +434,7 @@ def show_hints_and_solution(driver, *, num_hints, parsons):
     # Are you sure? Click 'Yes'
     get_hint_button = driver.find_element_by_css_selector(".hints-popup .btn-primary")
     assert get_hint_button.text == "Yes"
+    scroll_to_bottom(driver)
     get_hint_button.click()
 
     # Exactly one kind of solution visible
@@ -406,7 +452,7 @@ def run_code(editor, run_button, text):
 def await_result(driver, part, full):
     locator = (By.CLASS_NAME, "terminal")
 
-    WebDriverWait(driver, 10).until(text_to_be_present_in_element(locator, part))
+    WebDriverWait(driver, 20).until(text_to_be_present_in_element(locator, part))
     assert driver.find_element(*locator).text == full
 
 

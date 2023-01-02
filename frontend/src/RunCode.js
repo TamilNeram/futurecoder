@@ -3,10 +3,10 @@ import {
   bookState,
   currentStep,
   currentStepName,
-  postCodeEntry,
   loadedPromise,
   logEvent,
   moveStep,
+  postCodeEntry,
   ranCode
 } from "./book/store";
 import _ from "lodash";
@@ -15,7 +15,7 @@ import {animateScroll} from "react-scroll";
 import React from "react";
 import * as Sentry from "@sentry/react";
 import {wrapAsync} from "./frontendlib/sentry";
-import {taskClient, runCodeTask} from "./TaskClient";
+import {runCodeTask, taskClient} from "./TaskClient";
 
 export const terminalRef = React.createRef();
 
@@ -39,10 +39,9 @@ export async function runCode(entry) {
   try {
     await _runCode(entry)
   } catch (e) {
-    bookSetState("error", {
-      details: e.message,
-      title: "JS Error while running code: " + e.name,
-    });
+    showInternalErrorOutput(`${e.name}: ${e.message}`);
+    const {name, message, stack} = e;
+    bookSetState("error", {name, message, stack});
     Sentry.captureException(e);
   }
 }
@@ -76,7 +75,7 @@ export const _runCode = wrapAsync(async function runCode({code, source}) {
 
   await loadedPromise;
 
-  const {route, user, questionWizard, editorContent, numHints, requestingSolution} = bookState;
+  const {route, user, questionWizard, editorContent, assistant: {numHints, requestingSolution}} = bookState;
   if (!shell && !code) {
     code = editorContent;
   }
@@ -103,30 +102,40 @@ export const _runCode = wrapAsync(async function runCode({code, source}) {
     }
   }
 
-  const data = await runCodeTask(
-    entry,
-    outputCallback,
-    inputCallback,
-  );
+  let data;
+  try {
+    data = await runCodeTask(
+      entry,
+      outputCallback,
+      inputCallback,
+    );
+  } finally {
+    bookSetState("processing", false);
+    bookSetState("running", false);
+  }
 
   const {error} = data;
 
-  logEvent('run_code', {
+  const event = {
     code_source: entry.source,
     page_slug: entry.page_slug,
     step_name: entry.step_name,
     entry_passed: data.passed,
     has_error: Boolean(error),
-    num_messages: data.messages?.length,
     page_route: route,
     num_hints: numHints,
     requesting_solution: requestingSolution,
-  });
+  };
+  for (const section of data.message_sections || []) {
+    event[`num_messages_${section.type}`] = section.messages.length;
+  }
+  logEvent('run_code', event);
 
   if (error) {
     Sentry.captureEvent(error.sentry_event);
     delete error.sentry_event;
     bookSetState("error", {...error});
+    showInternalErrorOutput(error.title);
     return;
   }
 
@@ -165,7 +174,10 @@ export const _runCode = wrapAsync(async function runCode({code, source}) {
     entry,
     result: {
       passed: data.passed,
-      messages: data.messages?.map(m => _.truncate(m, {length: 1000})),
+      messageSections: data.message_sections?.map(section => ({
+        type: section.type,
+        messages: section.messages?.map(m => _.truncate(m, {length: 1000})),
+      })),
       output: _.truncate(data.output, {length: 1000}),
     },
   });
@@ -199,4 +211,12 @@ export const showCodeResult = ({birdseyeUrl, passed}) => {
   if (birdseyeUrl) {
     window.open(birdseyeUrl);
   }
+}
+
+function showInternalErrorOutput(message) {
+  showOutputParts([
+    {text: `\n${message.trim()}\n\n`, type: 'internal_error'},
+    {text: '', type: 'internal_error_explanation'},
+    {text: '>>> ', type: 'shell_prompt'},
+  ]);
 }

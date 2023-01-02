@@ -25,12 +25,12 @@ const sentryReduxEnhancer = Sentry.createReduxEnhancer({
     return action;
   },
   stateTransformer: state => {
-    state = _.omit(state, "book.pages");
+    state = state.book;
     try {
-      state = {...state, currentStep: currentStep(state.book)};
+      state = {...state, currentStep: currentStep(state)};
     } catch {
     }
-    return state;
+    return _.omit(state, "pages", "pageSlugsList");
   },
 });
 
@@ -42,7 +42,8 @@ if (sentryDsn) {
     normalizeDepth: 5,
     beforeBreadcrumb(breadcrumb, hint) {
       const {message} = breadcrumb;
-      if (message.includes("prev state") || message.includes("next state")) {
+      // Exclude console logging of redux actions
+      if (message.includes("prev state") || message.includes("next state") || message.includes("%c action  ")) {
         return null;
       }
       return breadcrumb;

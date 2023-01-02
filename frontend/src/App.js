@@ -5,10 +5,10 @@ import "./css/pygments.css"
 import "./css/github-markdown.css"
 import {connect} from "react-redux";
 import {
-  addMessage,
+  addSpecialMessage,
   bookSetState,
   bookState,
-  closeMessage,
+  closeSpecialMessage,
   currentPage,
   currentStep,
   currentStepName,
@@ -16,6 +16,7 @@ import {
   logEvent,
   movePage,
   moveStep,
+  openAssessment,
   postCodeEntry,
   setDeveloperMode,
   setEditorContent,
@@ -24,6 +25,7 @@ import {
 } from "./book/store";
 import Popup from "reactjs-popup";
 import AceEditor from "react-ace";
+import Collapsible from 'react-collapsible';
 import "ace-builds/src-noconflict/mode-python";
 import "ace-builds/src-noconflict/theme-monokai";
 import {FontAwesomeIcon} from '@fortawesome/react-fontawesome'
@@ -33,18 +35,19 @@ import {
   faCog,
   faCompress,
   faExpand,
+  faLightbulb,
+  faListCheck,
   faListOl,
   faPlay,
   faQuestionCircle,
   faSignOutAlt,
   faStop,
-  faTimes,
   faUserGraduate
 } from '@fortawesome/free-solid-svg-icons'
-import {HintsPopup} from "./Hints";
+import {HintsAssistant} from "./Hints";
 import Toggle from 'react-toggle'
 import "react-toggle/style.css"
-import {ErrorModal, feedbackContentStyle, FeedbackModal} from "./Feedback";
+import {ErrorBoundary, FeedbackMenuButton} from "./Feedback";
 import birdseyeIcon from "./img/birdseye_icon.png";
 import languageIcon from "./img/language.png";
 import {interrupt, runCode, terminalRef} from "./RunCode";
@@ -52,6 +55,7 @@ import firebase from "firebase/app";
 import {TableOfContents} from "./TableOfContents";
 import HeaderLoginInfo from "./components/HeaderLoginInfo";
 import * as terms from "./terms.json"
+import _ from "lodash";
 import {otherVisibleLanguages} from "./languages";
 
 
@@ -187,19 +191,139 @@ const Shell = () =>
 
 const Messages = (
   {
-    messages,
-  }) =>
-  messages.map((message, index) =>
-    <div key={index} className="card book-message">
-      <div
-        className="card-header"
-        onClick={() => closeMessage(index)}>
-        <FontAwesomeIcon icon={faTimes}/>
+    messageSections,
+  }) => {
+  const nonEmptySections = messageSections.filter(section => section?.messages?.length);
+  if (!nonEmptySections.length) {
+    return <p dangerouslySetInnerHTML={{__html: terms.assessment_description}}/>;
+  }
+  return nonEmptySections.map((section) => {
+    if (section.type === "passed_tests") {
+      return <div key={section.type} className="card alert alert-success" style={{padding: 0}}>
+        <div className="card-body">
+          <details>
+            <summary>
+              On the bright side, your code passed {section.messages.length} test(s)!
+            </summary>
+            <br/>
+            <SectionMessages section={section}/>
+          </details>
+        </div>
       </div>
-      <div className="card-body"
-           dangerouslySetInnerHTML={{__html: message}}/>
+    } else if (section.type === "messages") {
+      return <div key={section.type}>
+        <SectionMessages section={section}/>
+      </div>;
+    } else {
+      return <div key={section.type}>
+        <div className="alert alert-warning" role="alert">
+          Found the following generic problem(s) in your code:
+        </div>
+        <SectionMessages section={section}/>
+      </div>
+    }
+  });
+}
+
+const SectionMessages = ({section}) => {
+  return section.messages.map((message, index) =>
+    <div key={index}>
+      <div dangerouslySetInnerHTML={{__html: message}} className={`assistant-${section.type}-message`}/>
+      {index !== section.messages.length - 1 && <hr/>}
     </div>
   )
+}
+
+const Assistant = (assistant) => {
+  const {messageSections, step, lastSeenMessageSections} = assistant;
+  if (!step.requirements) {
+    return null;
+  }
+  const newMessages = messageSections.some((section) => {
+    if (section.type === "passed_tests" || !section.messages.length) {
+      return false;
+    }
+    const lastSeenSection = lastSeenMessageSections.find(s => s.type === section.type);
+    return section.messages.some((message) => !lastSeenSection?.messages.includes(message));
+  });
+  return <div className="assistant accordion">
+    <Collapsible classParentString="assistant-requirements card"
+                 contentInnerClassName="assistant-content card-body"
+                 trigger={<div className="card-header">
+                   <FontAwesomeIcon icon={faQuestionCircle}/> {terms.requirements}
+                 </div>}
+    >
+      <p>
+        {terms.requirements_description}
+      </p>
+      <ul>
+        {step.requirements.map((requirement, index) =>
+          <li key={index}>
+            <Requirement requirement={requirement}/>
+          </li>
+        )}
+      </ul>
+    </Collapsible>
+    <Collapsible onOpening={openAssessment}
+                 onClosing={() => bookSetState("assessmentOpen", false)}
+                 classParentString="assistant-assessment card"
+                 contentInnerClassName="assistant-content card-body"
+                 trigger={<div className="card-header">
+                   <FontAwesomeIcon icon={faListCheck}/> {terms.assessment} &nbsp;
+                   {newMessages && <span className="badge badge-pill badge-danger">{terms.new}</span>}
+                 </div>}
+    >
+      <Messages {...{messageSections}}/>
+    </Collapsible>
+    <Collapsible classParentString="assistant-hints card"
+                 contentInnerClassName="assistant-content card-body"
+                 trigger={<div className="card-header">
+                   <FontAwesomeIcon icon={faLightbulb}/> {terms.hints_and_solution}
+                 </div>}
+    >
+      <HintsAssistant {...assistant}/>
+    </Collapsible>
+  </div>
+    ;
+}
+
+const Requirement = (
+  {
+    requirement,
+  }) => {
+  let text;
+  switch (requirement.type) {
+    case "verbatim":
+      text = terms.verbatim;
+      break;
+    case "exercise":
+      text = terms.exercise_requirement;
+      break;
+    case "program_in_text":
+      text = terms.program_in_text;
+      break;
+    case "function_exercise":
+      text = _.template(terms.function_exercise)(requirement);
+      break;
+    case "function_exercise_goal":
+      text = _.template(terms.function_exercise_goal)(requirement);
+      break;
+    case "exercise_stdin":
+      text = terms.exercise_stdin;
+      break;
+    case "non_function_exercise":
+      if (!requirement.inputs.trim()) {
+        text = terms.no_input_variables;
+      } else {
+        text = _.template(terms.non_function_exercise)(requirement);
+      }
+      break;
+    default:
+      text = requirement.message;
+      break;
+  }
+  return <div className="assistant-requirement" dangerouslySetInnerHTML={{__html: text}}/>
+}
 
 const QuestionWizard = (
   {
@@ -262,10 +386,10 @@ const Markdown = (
 const CourseText = (
   {
     user,
-    step_index,
+    step,
     page,
     pages,
-    messages
+    assistant,
   }) =>
     <>
     <h1 dangerouslySetInnerHTML={{__html: page.title}}/>
@@ -274,13 +398,13 @@ const CourseText = (
         key={index}
         id={`step-text-${index}`}
         className={index > 0 ? 'pt-3' : ''}
-        style={index > step_index ? {display: 'none'} : {}}
+        style={index > step.index ? {display: 'none'} : {}}
       >
         <Markdown html={part.text} copyFunc={text => bookSetState("editorContent", text)}/>
         <hr style={{ margin: '0' }}/>
       </div>
     )}
-    <Messages {...{messages}}/>
+      <Assistant {...assistant} step={step}/>
     {/* pt-3 is Bootstrap's helper class. Shorthand for padding-top: 1rem. Available classes are pt-{1-5} */}
     <div className='pt-3'>
       {page.index > 0 &&
@@ -289,7 +413,7 @@ const CourseText = (
         {terms.previous}
       </button>}
       {" "}
-      {page.index < Object.keys(pages).length - 1 && step_index === page.steps.length - 1 &&
+      {page.index < Object.keys(pages).length - 1 && step.index === page.steps.length - 1 &&
       <button className="btn btn-success next-button"
               onClick={() => movePage(+1)}>
         {terms.next}
@@ -303,118 +427,128 @@ const CourseText = (
 
 class AppComponent extends React.Component {
   render() {
-    const {
-      numHints,
-      editorContent,
-      messages,
-      questionWizard,
-      pages,
-      requestingSolution,
-      user,
-      error,
-      prediction,
-      route,
-      previousRoute,
-      running,
-    } = this.props;
-    if (route === "toc") {
+    if (this.props.route === "toc") {
       return <TableOfContents/>
     }
-    const isQuestionWizard = route === "question";
-    const fullIde = route === "ide";
 
-    const page = currentPage();
-    const step = currentStep();
-    const step_index = step.index;
-
-    let showEditor, showSnoop, showPythonTutor, showBirdseye, showQuestionButton;
-    if (fullIde || isQuestionWizard) {
-      showEditor = true;
-      showSnoop = true;
-      showPythonTutor = true;
-      showBirdseye = true;
-      showQuestionButton = !(isQuestionWizard || previousRoute === "question");
-    } else if (step.text.length) {
-      showEditor = page.index >= pages.WritingPrograms.index;
-      const snoopPageIndex = pages.UnderstandingProgramsWithSnoop.index;
-      showSnoop = page.index > snoopPageIndex ||
-        (page.index === snoopPageIndex && step_index >= 1);
-      showPythonTutor = page.index >= pages.UnderstandingProgramsWithPythonTutor.index;
-      showBirdseye = page.index >= pages.IntroducingBirdseye.index;
-      showQuestionButton = page.index > pages.IntroducingBirdseye.index;
-    }
-
-    const cantUseEditor = prediction.state === "waiting" || prediction.state === "showingResult";
     return <div className="book-container">
-      <nav className="navbar navbar-expand-lg navbar-light bg-light">
+      <NavBar user={this.props.user}/>
+      <ErrorBoundary canGiveFeedback>
+        <AppMain {...this.props}/>
+      </ErrorBoundary>
+    </div>
+  }
+}
+
+function NavBar({user}) {
+  return <nav className="navbar navbar-expand-lg navbar-light bg-light">
         <span className="nav-item custom-popup">
           <MenuPopup user={user}/>
         </span>
-        <span className="nav-item navbar-text">
+    <span className="nav-item navbar-text">
           <HeaderLoginInfo email={user.email}/>
         </span>
-        <a className="nav-item nav-link" href="#toc">
-          <FontAwesomeIcon icon={faListOl}/> {terms.table_of_contents}
-        </a>
-      </nav>
+    <a className="nav-item nav-link" href="#toc">
+      <FontAwesomeIcon icon={faListOl}/> {terms.table_of_contents}
+    </a>
+  </nav>;
+}
 
-      {!fullIde &&
+function AppMain(
+  {
+    editorContent,
+    assistant,
+    specialMessages,
+    questionWizard,
+    pages,
+    user,
+    prediction,
+    route,
+    previousRoute,
+    running,
+  }) {
+  const isQuestionWizard = route === "question";
+  const fullIde = route === "ide";
+
+  const page = currentPage();
+  const step = currentStep();
+
+  let showEditor, showSnoop, showPythonTutor, showBirdseye, showQuestionButton;
+  if (fullIde || isQuestionWizard) {
+    showEditor = true;
+    showSnoop = true;
+    showPythonTutor = true;
+    showBirdseye = true;
+    showQuestionButton = !(isQuestionWizard || previousRoute === "question");
+  } else if (step.text.length) {
+    showEditor = page.index >= pages.WritingPrograms.index;
+    const snoopPageIndex = pages.UnderstandingProgramsWithSnoop.index;
+    showSnoop = page.index > snoopPageIndex ||
+      (page.index === snoopPageIndex && step.index >= 1);
+    showPythonTutor = page.index >= pages.UnderstandingProgramsWithPythonTutor.index;
+    showBirdseye = page.index >= pages.IntroducingBirdseye.index;
+    showQuestionButton = page.index > pages.IntroducingBirdseye.index;
+  }
+
+  const cantUseEditor = prediction.state === "waiting" || prediction.state === "showingResult";
+
+  return <>
+    {!fullIde &&
       <div className="book-text markdown-body">
         {isQuestionWizard ?
           <QuestionWizard {...questionWizard}/>
           :
           <div onCopy={checkCopy}>
-            <CourseText {...{
-              user,
-              step_index,
-              page,
-              pages,
-              messages
-            }}/>
+            <CourseText
+              {...{
+                assistant,
+                user,
+                step,
+                page,
+                pages,
+              }}/>
           </div>
         }
       </div>
 
-      }
+    }
 
-      <EditorButtons {...{
-        showBirdseye,
-        showEditor,
-        showSnoop,
-        showPythonTutor,
-        showQuestionButton,
-        disabled: cantUseEditor,
-        running,
-      }}/>
+    <EditorButtons {...{
+      showBirdseye,
+      showEditor,
+      showSnoop,
+      showPythonTutor,
+      showQuestionButton,
+      disabled: cantUseEditor,
+      running,
+    }}/>
 
-      <div className={`ide ide-${fullIde ? 'full' : 'half'}`}>
-        <div className="editor-and-terminal">
-          {showEditor &&
-           <Editor value={editorContent} readOnly={cantUseEditor}/>
-          }
-          <div className="terminal" style={{height: showEditor ? undefined : "100%"}}>
-            <Shell/>
-          </div>
+    <div className={`ide ide-${fullIde ? 'full' : 'half'}`}>
+      <div className="editor-and-terminal">
+        {showEditor &&
+          <Editor value={editorContent} readOnly={cantUseEditor}/>
+        }
+        <div className="terminal" style={{height: showEditor ? undefined : "100%"}}>
+          <Shell/>
         </div>
       </div>
-
-      <a className="btn btn-primary full-ide-button"
-         href={"#" + (!fullIde ? "ide" : (specialHash(previousRoute) ? previousRoute : page.slug))}>
-        <FontAwesomeIcon icon={fullIde ? faCompress : faExpand}/>
-      </a>
-
-      {!(fullIde || isQuestionWizard) &&
-      <HintsPopup
-        hints={step.hints}
-        numHints={numHints}
-        requestingSolution={requestingSolution}
-        solution={step.solution}
-      />
-      }
-
-      <ErrorModal error={error}/>
     </div>
-  }
+
+    <a className="btn btn-primary full-ide-button"
+       href={"#" + (!fullIde ? "ide" : (specialHash(previousRoute) ? previousRoute : page.slug))}>
+      <FontAwesomeIcon icon={fullIde ? faCompress : faExpand}/>
+    </a>
+
+    {specialMessages.map((message, index) =>
+      <Popup
+        key={index}
+        open={true}
+        onClose={() => closeSpecialMessage(index)}
+      >
+        <SpecialMessageModal message={message}/>
+      </Popup>
+    )}
+  </>;
 }
 
 const StepButton = ({delta, label}) =>
@@ -472,23 +606,10 @@ const MenuPopup = ({user}) =>
             <SettingsModal user={user}/>
           </Popup>
         </p>
-        <p>
-          <Popup
-            trigger={
-              <button className="btn btn-success">
-                <FontAwesomeIcon icon={faBug}/> {terms.feedback}
-              </button>
-            }
-            modal
-            nested
-            contentStyle={feedbackContentStyle}
-          >
-            {close => <FeedbackModal close={close}/>}
-          </Popup>
-        </p>
+        <FeedbackMenuButton/>
         {
           otherVisibleLanguages.map(lang =>
-            <p>
+            <p key={lang.code}>
               <a href={lang.url + "course/"} className="btn btn-link"
                  style={{borderColor: "grey"}}>
                 <img
@@ -527,6 +648,12 @@ const SettingsModal = ({user}) => (
   </div>
 )
 
+const SpecialMessageModal = ({message}) => (
+  <div className="special-message-modal">
+    <div dangerouslySetInnerHTML={{__html: message}}/>
+  </div>
+);
+
 const checkCopy = () => {
   const selection = document.getSelection();
   const codeElement = (node) => node.parentElement.closest("code");
@@ -539,7 +666,7 @@ const checkCopy = () => {
       ])
       .some((node) => node && !node.classList.contains("copyable"))
   ) {
-    addMessage(terms.copy_warning);
+    addSpecialMessage(terms.copy_warning);
   }
 }
 
